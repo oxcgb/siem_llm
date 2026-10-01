@@ -1,0 +1,54 @@
+[
+  {
+    "username": "test-impossible-travel",
+    "min_diff": 5,
+    "off_hours": true,
+    "multi_geo": true,
+    "geo_gap_min": 30,
+    "ad_without_vpn": false,
+    "failed_logins": 0,
+    "vpn_geo": "Russia, Moscow | Brazil, Sao Paulo",
+    "vpn_ips": "1.2.3.4 (03:00) | 5.6.7.8 (03:30)",
+    "ad_ips": "10.0.0.5 (03:01)",
+    "expected": "suspicious"
+  },
+  {
+    "username": "test-normal-user",
+    "min_diff": 10,
+    "off_hours": false,
+    "multi_geo": false,
+    "geo_gap_min": null,
+    "ad_without_vpn": false,
+    "failed_logins": 0,
+    "vpn_geo": "Russia, Moscow",
+    "vpn_ips": "1.2.3.4 (09:00)",
+    "ad_ips": "10.0.0.5 (09:10)",
+    "expected": "benign"
+  },
+  {
+    "username": "test-brute-force-unsucc",
+    "min_diff": null,
+    "off_hours": true,
+    "multi_geo": false,
+    "geo_gap_min": null,
+    "ad_without_vpn": false,
+    "failed_logins": 15,
+    "vpn_geo": "Russia, Moscow",
+    "vpn_ips": "1.2.3.4 (02:00)",
+    "ad_ips": "N/A",
+    "expected": "suspicious"
+  },
+  {
+    "username": "test-brute-force-succ",
+    "min_diff": 3,
+    "off_hours": true,
+    "multi_geo": true,
+    "geo_gap_min": 45,
+    "ad_without_vpn": true,
+    "failed_logins": 20,
+    "vpn_geo": "Russia, Moscow | China, Beijing",
+    "vpn_ips": "1.2.3.4 (02:00) | 9.8.7.6 (02:45)",
+    "ad_ips": "10.99.0.5 (02:48)",
+    "expected": "malicious"
+  }
+]

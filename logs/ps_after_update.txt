@@ -1,0 +1,4 @@
+NAME            IMAGE                      COMMAND                  SERVICE    CREATED          STATUS                    PORTS
+siem_api        soc-llm-api                "uvicorn main:app --…"   api        18 minutes ago   Up 18 minutes (healthy)   8001/tcp
+siem_frontend   soc-llm-frontend           "/docker-entrypoint-…"   frontend   18 minutes ago   Up 18 minutes (healthy)   0.0.0.0:80->80/tcp, [::]:80->80/tcp
+siem_vllm       vllm/vllm-openai:v0.11.0   "python3 -m vllm.ent…"   vllm       3 minutes ago    Up 3 minutes (healthy)    

@@ -1,0 +1,102 @@
+name: soc-llm
+
+services:
+  vllm:
+    image: vllm/vllm-openai:v0.11.0
+    container_name: siem_vllm
+    shm_size: '4gb'
+    volumes:
+      - ./data/models:/root/.cache/huggingface
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    command: >
+      --model Qwen/Qwen3-8B-AWQ
+      --quantization awq
+      --gpu-memory-utilization 0.85
+      --max-model-len 8192
+      --max-num-seqs 16
+      --enable-prefix-caching
+    restart: unless-stopped
+    logging: &logging
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request as u; u.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 180s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  api:
+    build: ./api
+    container_name: siem_api
+    depends_on:
+      vllm:
+        condition: service_healthy
+    environment:
+      - VLLM_BASE_URL=http://vllm:8000/v1
+      - VLLM_MODEL=Qwen/Qwen3-8B-AWQ
+      - VLLM_IMAGE_TAG=v0.11.0
+      - DATA_DIR=/app/data
+      - BACKEND_API_KEY=${BACKEND_API_KEY:?Set BACKEND_API_KEY in .env}
+      - SECRET_KEY=${SECRET_KEY:-}
+      - AUTH_MODE=${AUTH_MODE:-local}
+      - SOC_USER=${SOC_USER:-}
+      - SOC_PASS=${SOC_PASS:-}
+      - ADMIN_USERNAMES=${ADMIN_USERNAMES:-}
+      - TZ=${TZ:-Europe/Moscow}
+      - ANALYSIS_TZ=${ANALYSIS_TZ:-Europe/Moscow}
+      - GEO_PROVIDER=${GEO_PROVIDER:-auto}
+      - SIEM_VERIFY=${SIEM_VERIFY:-false}
+      - ALLOW_PUBLIC_TARGETS=${ALLOW_PUBLIC_TARGETS:-false}
+      - BRUTE_FORCE_THRESHOLD=${BRUTE_FORCE_THRESHOLD:-5}
+      - OFF_HOURS_START=${OFF_HOURS_START:-20}
+      - OFF_HOURS_END=${OFF_HOURS_END:-8}
+      - EXCLUDED_AD_NETS=${EXCLUDED_AD_NETS:-10.0.101.0/24}
+      - TECHNICAL_IPS=${TECHNICAL_IPS:-10.77.36.11,10.77.1.3,0.0.0.0,127.0.0.1,255.255.255.255,::}
+      - RETENTION_DAYS=${RETENTION_DAYS:-7}
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-180}
+      - TG_PROXY=${TG_PROXY:-}
+      - ALERT_COOLDOWN_MIN=${ALERT_COOLDOWN_MIN:-120}
+      - FETCH_MAX_PAGES=${FETCH_MAX_PAGES:-4}
+      - BACKUP_KEEP=${BACKUP_KEEP:-14}
+      - PLAYBOOK_RUN_DAYS=${PLAYBOOK_RUN_DAYS:-14}
+      - INCIDENT_MIN_SCORE=${INCIDENT_MIN_SCORE:-20}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/app/data
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+
+  frontend:
+    build: ./frontend
+    container_name: siem_frontend
+    depends_on:
+      - api
+    environment:
+      - AUTH_MODE=${AUTH_MODE:-local}
+      - SOC_USER=${SOC_USER:?Set SOC_USER in .env}
+      - SOC_PASS=${SOC_PASS:?Set SOC_PASS in .env}
+      - BACKEND_API_KEY=${BACKEND_API_KEY:?Set BACKEND_API_KEY in .env}
+      - LOGIN_RATE_RPM=${LOGIN_RATE_RPM:-5}
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    logging: *logging

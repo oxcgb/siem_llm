@@ -1,0 +1,12 @@
+line-length = 120
+target-version = "py310"
+
+[lint]
+select = ["E", "F", "W", "B"]
+ignore = [
+    "E501",  # long lines: logging calls with SQL are intentionally long
+    "B008",  # FastAPI Depends() in defaults is idiomatic
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["B011"]
