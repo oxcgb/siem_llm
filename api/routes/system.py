@@ -214,7 +214,8 @@ def stats_summary():
             "recent_vpn": [
                 dict(r) for r in conn.execute(
                     "SELECT id,timestamp,username,src_ip,action "
-                    "FROM vpn_events ORDER BY timestamp DESC LIMIT 10"
+                    "FROM vpn_events WHERE action != 'unknown' AND username != 'N/A' "
+                    "ORDER BY timestamp DESC LIMIT 10"
                 ).fetchall()
             ]
         }

@@ -1,4 +1,5 @@
 import datetime
+import ipaddress
 import json
 import logging
 from zoneinfo import ZoneInfo
@@ -30,6 +31,11 @@ def _get_telegram_config():
     return cfg
 
 
+def _tg_cred():
+    cfg = _get_telegram_config()
+    return cfg.get("bot_token", ""), cfg.get("chat_id", "")
+
+
 def save_telegram_config(cfg):
     with db() as conn:
         conn.execute(
@@ -56,9 +62,6 @@ def _send(token, chat_id, text):
 
 
 def _fmt_local(ts):
-    """Format a UTC timestamp string in the configured local timezone
-    (ANALYSIS_TZ, e.g. Europe/Moscow -> '2026-10-01 07:31:17 MSK').
-    Falls back to the raw value labelled UTC."""
     for f in (FMT, "%Y-%m-%d %H:%M"):
         try:
             dt = datetime.datetime.strptime(str(ts), f).replace(tzinfo=UTC)
@@ -81,8 +84,6 @@ def _alert_key(inc):
 
 
 def _already_alerted(inc):
-    """True if this exact incident state was already alerted,
-    or the user is inside the re-alert cooldown window."""
     user = inc.get("username", "?")
     cutoff = (datetime.datetime.now(UTC)
               - datetime.timedelta(minutes=settings.alert_cooldown_min)
@@ -186,11 +187,50 @@ def send_alert(incidents):
             _mark_alerted(inc)
             sent += 1
         else:
-            # Telegram down: marks not written -> retried next cycle
             break
 
     if sent > 0:
         log.info("[TG] sent %d", sent)
+    return sent
+
+
+def check_vpn_bruteforce():
+    """Alert on public IPs with >= NET_BRUTE_ALERT failed VPN logins
+    in the last hour. Uses event_count multiplicities (real attempts).
+    Dedup via alert_log with the standard cooldown."""
+    cutoff = (datetime.datetime.now(UTC) - datetime.timedelta(hours=1)).strftime(FMT)
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT src_ip, SUM(COALESCE(event_count,1)) attempts "
+            "FROM vpn_events WHERE action='login_failed' AND timestamp >= ? "
+            "AND src_ip != 'N/A' GROUP BY src_ip HAVING attempts >= ?",
+            (cutoff, settings.net_brute_alert)).fetchall()
+
+    token, chat_id = _tg_cred()
+    if not token or not chat_id:
+        return 0
+
+    sent = 0
+    for r in rows:
+        try:
+            if ipaddress.ip_address(r["src_ip"]).is_private:
+                continue
+        except ValueError:
+            continue
+        marker = {"username": "bruteforce:" + r["src_ip"],
+                  "last_seen": r["src_ip"], "severity": "high"}
+        if _already_alerted(marker):
+            continue
+        text = ("[SOC-ALERT] HIGH | VPN Brute Force\n"
+                "Attacker IP: " + r["src_ip"] + "\n"
+                "Failed logins (1h): " + str(r["attempts"]) + "\n"
+                "Action: whois, block on ASA, check for successful logins")
+        if _send(token, chat_id, text):
+            _mark_alerted(marker)
+            sent += 1
+            log.info("[TG] bruteforce alert: %s (%d attempts)", r["src_ip"], r["attempts"])
+        else:
+            break
     return sent
 
 

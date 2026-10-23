@@ -7,7 +7,6 @@ from contextlib import contextmanager
 
 from config import settings
 
-# Prompt source of truth + versioning (see agent_prompts.py)
 from agent_prompts import (
     DEFAULT_TRIAGE_PROMPT,
     PROMPT_VERSION,
@@ -52,11 +51,7 @@ def _index_exists(conn, name):
 
 
 def backup_db(keep=None):
-    """Hot-copy the database via VACUUM INTO; rotate old backups.
-
-    Uses a raw connection: VACUUM cannot run inside a transaction.
-    Backups land in DATA_DIR/backups (host: ./data/backups).
-    """
+    """Hot-copy the database via VACUUM INTO; rotate old backups."""
     if keep is None:
         keep = settings.backup_keep
     backups_dir = os.path.join(settings.data_dir, "backups")
@@ -117,6 +112,56 @@ def _upgrade_default_prompt(conn):
         (str(PROMPT_VERSION),))
 
 
+def _backfill_network_events(conn):
+    """One-time migration: move legacy network-looking events (stored
+    as action='unknown' in vpn_events before the network parser
+    existed) into network_events."""
+    from normalizer import (normalize_network_log, NET_DROP_RATE_RE, NET_DENIED_IP_RE,
+                        NET_ACL_RE, NET_DENY_FLOW_RE, NET_DENY_NOCONN_RE,
+                        NET_DENY_ICMP_RE, NET_DENY_PROTO_RE)
+
+    if conn.execute(
+            "SELECT value FROM settings WHERE key='network_backfill_done'"
+    ).fetchone():
+        return
+
+    moved = 0
+    rows = conn.execute(
+        "SELECT id, timestamp, raw_event FROM vpn_events WHERE action='unknown'"
+    ).fetchall()
+    for r in rows:
+        raw = r["raw_event"] or ""
+        if not (NET_DROP_RATE_RE.search(raw) or NET_DENIED_IP_RE.search(raw)
+                or NET_ACL_RE.search(raw) or NET_DENY_FLOW_RE.search(raw)
+                or NET_DENY_NOCONN_RE.search(raw) or NET_DENY_ICMP_RE.search(raw)
+                or NET_DENY_PROTO_RE.search(raw)):
+            continue
+        # event_count suffix from the aggregator is not part of the
+        # original message - strip it before re-parsing
+        clean = raw.split(" [+")[0]
+        ev = normalize_network_log({"MESSAGE": clean, "TIME": r["timestamp"]})
+        if ev["action"] == "network_other":
+            continue
+        conn.execute(
+            "INSERT INTO network_events "
+            "(rule_id, timestamp, subject, subject_kind, src_ip, dst_ip, dst_port, "
+            "protocol, acl, action, event_type, burst_rate, burst_max, "
+            "avg_rate, avg_max, avg_ratio, cumulative, event_count, raw_event) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("", ev["timestamp"], ev["subject"], ev["subject_kind"],
+             ev["src_ip"], ev["dst_ip"], ev["dst_port"], ev["protocol"],
+             ev["acl"], ev["action"], ev["event_type"], ev["burst_rate"],
+             ev["burst_max"], ev["avg_rate"], ev["avg_max"], ev["avg_ratio"],
+             ev["cumulative"], 1, raw))
+        conn.execute("DELETE FROM vpn_events WHERE id=?", (r["id"],))
+        moved += 1
+    if moved:
+        log.info("Backfill: moved %d network events from vpn_events", moved)
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key,value) "
+        "VALUES ('network_backfill_done','1')")
+
+
 def init_db():
     os.makedirs(settings.data_dir, exist_ok=True)
     conn = get_db()
@@ -160,6 +205,36 @@ def init_db():
                 src_ip TEXT DEFAULT 'N/A',
                 hostname TEXT DEFAULT 'N/A',
                 action TEXT DEFAULT '',
+                raw_event TEXT DEFAULT '',
+                risk_score INTEGER DEFAULT 0,
+                verdict TEXT DEFAULT 'benign',
+                reason TEXT DEFAULT 'normal',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS network_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id TEXT DEFAULT '',
+                timestamp TEXT DEFAULT '',
+                subject TEXT DEFAULT 'N/A',
+                subject_kind TEXT DEFAULT 'none',
+                src_ip TEXT DEFAULT 'N/A',
+                src_port TEXT DEFAULT 'N/A',
+                src_if TEXT DEFAULT 'N/A',
+                dst_ip TEXT DEFAULT 'N/A',
+                dst_port TEXT DEFAULT 'N/A',
+                dst_if TEXT DEFAULT 'N/A',
+                protocol TEXT DEFAULT 'N/A',
+                acl TEXT DEFAULT 'N/A',
+                flags TEXT DEFAULT 'N/A',
+                action TEXT DEFAULT '',
+                event_type TEXT DEFAULT '',
+                burst_rate INTEGER,
+                burst_max INTEGER,
+                avg_rate INTEGER,
+                avg_max INTEGER,
+                avg_ratio REAL,
+                cumulative INTEGER,
+                event_count INTEGER DEFAULT 1,
                 raw_event TEXT DEFAULT '',
                 risk_score INTEGER DEFAULT 0,
                 verdict TEXT DEFAULT 'benign',
@@ -230,15 +305,25 @@ def init_db():
                             ("reason", "TEXT DEFAULT 'normal'"), ("private_ip", "TEXT DEFAULT 'N/A'")]),
             ("ad_events", [("hostname", "TEXT DEFAULT 'N/A'"), ("risk_score", "INTEGER DEFAULT 0"),
                            ("verdict", "TEXT DEFAULT 'benign'"), ("reason", "TEXT DEFAULT 'normal'")]),
+            # network_events: fresh installs get the full schema from
+            # CREATE TABLE; existing ones upgraded via ALTER
+            ("network_events", [("src_port", "TEXT DEFAULT 'N/A'"), ("src_if", "TEXT DEFAULT 'N/A'"),
+                                ("dst_if", "TEXT DEFAULT 'N/A'"), ("flags", "TEXT DEFAULT 'N/A'")]),
         ):
             for col, ddl in cols:
                 if not _column_exists(conn, table, col):
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
+        # Brute-force counting: store the dedup aggregator's multiplicity
+        # so SUM(event_count) reflects REAL failed-login counts
+        for table in ("vpn_events", "ad_events"):
+            if not _column_exists(conn, table, "event_count"):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN event_count INTEGER DEFAULT 1")
+
         if not _column_exists(conn, "geo_cache", "timezone"):
             conn.execute("ALTER TABLE geo_cache ADD COLUMN timezone TEXT DEFAULT ''")
 
-        # P1-4: one-time normalization of legacy ISO ('T'-separated) timestamps.
+        # One-time normalization of legacy ISO ('T'-separated) timestamps.
         for table in ("vpn_events", "ad_events"):
             cur = conn.execute(
                 f"UPDATE OR IGNORE {table} "
@@ -248,9 +333,7 @@ def init_db():
                 log.info("Migrated %d ISO timestamps in %s", cur.rowcount, table)
 
         # Dedup is a ONE-TIME migration: once the unique indexes exist,
-        # INSERT OR IGNORE makes duplicates impossible. The DELETE below
-        # scans the whole table and made every startup slow on large
-        # event tables - skip it when indexes are already in place.
+        # INSERT OR IGNORE makes duplicates impossible.
         need_dedup = not (_index_exists(conn, "uq_vpn_events")
                           and _index_exists(conn, "uq_ad_events"))
         if need_dedup:
@@ -274,8 +357,22 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_ad_action ON ad_events(action);
             CREATE INDEX IF NOT EXISTS idx_alert_log_user ON alert_log(username, sent_at);
             CREATE INDEX IF NOT EXISTS idx_playbook_runs_rule ON playbook_runs(rule_id, id);
+            CREATE INDEX IF NOT EXISTS idx_net_ts ON network_events(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_net_subject_ts ON network_events(subject, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_net_action_ts ON network_events(action, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_net_src_ts ON network_events(src_ip, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_net_dst_ts ON network_events(dst_ip, timestamp);
         ''')
 
+        # Reclassify legacy 'other' subjects as categories (Scanning etc.)
+        cur = conn.execute(
+            "UPDATE network_events SET subject_kind='category' "
+            "WHERE subject_kind='other' AND subject GLOB '[A-Za-z]*' "
+            "AND subject NOT LIKE '% %'")
+        if cur.rowcount:
+            log.info("Reclassified %d subjects as categories", cur.rowcount)
+
+        _backfill_network_events(conn)
         _upgrade_default_prompt(conn)
         conn.commit()
     finally:

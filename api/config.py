@@ -43,6 +43,10 @@ class Settings:
     # Incidents: minimum risk score to be listed (0 = everyone with VPN+AD)
     incident_min_score = int(os.getenv("INCIDENT_MIN_SCORE", "20"))
 
+    # Network alerting: VPN brute-force attempts per hour from one
+    # public IP that trigger a Telegram alert
+    net_brute_alert = int(os.getenv("NET_BRUTE_ALERT", "50"))
+
     # P1: alerting
     tg_proxy = os.getenv("TG_PROXY", "")
     alert_cooldown_min = int(os.getenv("ALERT_COOLDOWN_MIN", "120"))

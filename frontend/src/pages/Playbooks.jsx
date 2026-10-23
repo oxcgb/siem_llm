@@ -84,6 +84,15 @@ export default function Playbooks() {
     setDetailLoading(false);
   };
 
+  const deleteRun = async (id) => {
+    try {
+      await api('/api/playbook-runs/' + id, { method: 'DELETE' });
+      if (detail && detail.id === id) setDetail(null);
+      loadRuns();
+      message.success('Deleted');
+    } catch (e) { message.error(e.message); }
+  };
+
   const add = async (v) => {
     try {
       await api('/api/rules', {
@@ -172,13 +181,21 @@ export default function Playbooks() {
     { title: 'Analyzed', dataIndex: 'analyzed', width: 85 },
     { title: 'Started', dataIndex: 'started_at', width: 160,
       render: v => fmtTime(v) },
-    { title: '', width: 90, render: (_, r) => (
-      <Button size="small" onClick={() => openRun(r.id)}>
-        View</Button>
+    { title: '', width: 140, render: (_, r) => (
+      <Space>
+        <Button size="small" onClick={() => openRun(r.id)}>
+          View</Button>
+        <Popconfirm title="Delete this run?"
+          onConfirm={() => deleteRun(r.id)}>
+          <Button danger size="small"
+            icon={<DeleteOutlined />} />
+        </Popconfirm>
+      </Space>
     ) }
   ];
 
   const events = detail?.events || [];
+  const isNetRun = detail && detail.rule_id === 'network';
   const filteredEvents = verdictFilter === 'all'
     ? events
     : events.filter(e => e.verdict === verdictFilter);
@@ -196,12 +213,23 @@ export default function Playbooks() {
     { title: 'Verdict', dataIndex: 'verdict', width: 110,
       render: v => {
         const c = v === 'malicious' ? 'red' :
-          v === 'suspicious' ? 'orange' :
-          v === 'benign' ? 'green' : 'default';
+          v === 'suspicious' ? 'orange' : 'green';
         return <Tag color={c}>{v}</Tag>;
       } },
     { title: 'Risk', dataIndex: 'risk_score', width: 60 },
     { title: 'Reason', dataIndex: 'reason', ellipsis: true }
+  ];
+
+  const netCols = [
+    { title: 'Subject', dataIndex: 'subject', width: 160,
+      render: v => <Text strong copyable>{v}</Text> },
+    { title: 'Severity', dataIndex: 'severity', width: 100,
+      render: v => (
+        <Tag color={v === 'high' ? 'red' :
+          v === 'medium' ? 'orange' : 'blue'}>{v || 'â€”'}</Tag>
+      ) },
+    { title: 'Finding', dataIndex: 'finding', ellipsis: true },
+    { title: 'Recommendation', dataIndex: 'recommendation', ellipsis: true }
   ];
 
   return (
@@ -285,7 +313,13 @@ export default function Playbooks() {
 
       <Drawer
         title={detail
-          ? `Run #${detail.id} — ${detail.rule_name}` : 'Run'}
+          ? `Run #${detail.id} - ${detail.rule_name}` : 'Run'}
+        extra={detail && (
+          <Popconfirm title="Delete this run?"
+            onConfirm={() => deleteRun(detail.id)}>
+            <Button danger size="small">Delete</Button>
+          </Popconfirm>
+        )}
         width="80%" open={!!detail}
         onClose={() => setDetail(null)}>
         {detail && (
@@ -308,21 +342,27 @@ export default function Playbooks() {
               <Alert type="error" showIcon style={{ marginBottom: 16 }}
                 message={detail.error} />
             )}
-            <Space style={{ marginBottom: 12 }}>
-              <Select value={verdictFilter}
-                onChange={setVerdictFilter} style={{ width: 170 }}>
-                <Select.Option value="all">All verdicts</Select.Option>
-                <Select.Option value="malicious">malicious</Select.Option>
-                <Select.Option value="suspicious">suspicious</Select.Option>
-                <Select.Option value="benign">benign</Select.Option>
-                <Select.Option value="not_analyzed">not_analyzed</Select.Option>
-              </Select>
-              <Text type="secondary">
-                {filteredEvents.length} / {events.length} events
-              </Text>
-            </Space>
-            <Table dataSource={filteredEvents} columns={evtCols}
-              rowKey={r => r.source_type + '-' + r.id}
+            {!isNetRun && (
+              <Space style={{ marginBottom: 12 }}>
+                <Select value={verdictFilter}
+                  onChange={setVerdictFilter} style={{ width: 170 }}>
+                  <Select.Option value="all">All verdicts</Select.Option>
+                  <Select.Option value="malicious">malicious</Select.Option>
+                  <Select.Option value="suspicious">suspicious</Select.Option>
+                  <Select.Option value="benign">benign</Select.Option>
+                  <Select.Option value="not_analyzed">not_analyzed</Select.Option>
+                </Select>
+                <Text type="secondary">
+                  {filteredEvents.length} / {events.length} events
+                </Text>
+              </Space>
+            )}
+            <Table
+              dataSource={isNetRun ? events : filteredEvents}
+              columns={isNetRun ? netCols : evtCols}
+              rowKey={r => isNetRun
+                ? ((r.subject || '') + (r.finding || ''))
+                : (r.source_type + '-' + r.id)}
               size="small" pagination={{ pageSize: 50 }}
               loading={detailLoading} />
           </>

@@ -72,7 +72,7 @@ def build_incidents(usernames=None):
         failed = defaultdict(int)
         for table, act in (("vpn_events", "login_failed"), ("ad_events", "logon_failed")):
             for r in conn.execute(
-                    f"SELECT username,COUNT(*) c FROM {table} WHERE action=? AND timestamp >= ? GROUP BY username",
+                    f"SELECT username,SUM(COALESCE(event_count,1)) c FROM {table} WHERE action=? AND timestamp >= ? GROUP BY username",
                     (act, cutoff)):
                 if _valid_user(r["username"]):
                     failed[r["username"]] += r["c"]

@@ -61,8 +61,9 @@ def auto_triage():
                 inc["ai_reason"] = r.get("ai_reason", "")
 
         try:
-            from alerter import send_alert
+            from alerter import send_alert, check_vpn_bruteforce
             sent = send_alert(fresh)
+            sent += check_vpn_bruteforce()
             TRIAGE_STATUS.update(alerts_sent=sent)
         except Exception as e:
             log.error("[ALERT] %s", e)
@@ -96,10 +97,11 @@ def retention_job():
     with db() as conn:
         v = conn.execute("DELETE FROM vpn_events WHERE timestamp < ?", (cutoff,)).rowcount
         a = conn.execute("DELETE FROM ad_events WHERE timestamp < ?", (cutoff,)).rowcount
+        n = conn.execute("DELETE FROM network_events WHERE timestamp < ?", (cutoff,)).rowcount
         l = conn.execute("DELETE FROM alert_log WHERE sent_at < ?", (alert_cutoff,)).rowcount
         p = conn.execute("DELETE FROM playbook_runs WHERE started_at < ?", (pb_cutoff,)).rowcount
-    if v or a or l or p:
-        log.info("[RET] vpn=%d ad=%d alert_log=%d playbook_runs=%d", v, a, l, p)
+    if v or a or n or l or p:
+        log.info("[RET] vpn=%d ad=%d net=%d alert_log=%d playbook_runs=%d", v, a, n, l, p)
 
 
 def backup_job():

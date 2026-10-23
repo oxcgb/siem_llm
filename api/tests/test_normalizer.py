@@ -125,3 +125,53 @@ class TestEstimateTokens:
         # regression guard: len//4 underestimated 5x on real data
         text = '{"user":"a","ips":"1.2.3.4 (10:00)","facts":[1,2,3]}' * 10
         assert estimate_tokens(text) >= len(text) * 0.4
+
+from normalizer import normalize_network_log
+
+
+class TestNetworkEvents:
+    # Real production samples (SIEM strips %ASA-4-733100: headers)
+
+    def test_drop_rate_ip_subject(self):
+        raw = {"MESSAGE": "[   10.77.20.0] drop rate-1 exceeded. Current burst rate "
+                          "is 31 per second, max configured rate is 40; Current average "
+                          "rate is 83 per second, max configured rate is 20; Cumulative "
+                          "total count is 50210"}
+        ev = normalize_network_log(raw)
+        assert ev["action"] == "drop_rate_exceeded"
+        assert ev["subject"] == "10.77.20.0"
+        assert ev["subject_kind"] == "ip"
+        assert ev["burst_rate"] == 31 and ev["burst_max"] == 40
+        assert ev["avg_rate"] == 83 and ev["avg_max"] == 20
+        assert ev["avg_ratio"] == 4.2  # 83/20
+        assert ev["cumulative"] == 50210
+
+    def test_drop_rate_proto_subject(self):
+        raw = {"MESSAGE": "[  HTTP   80] drop rate-1 exceeded. Current burst rate "
+                          "is 17 per second, max configured rate is 10; Current average "
+                          "rate is 55 per second, max configured rate is 5; Cumulative "
+                          "total count is 33072"}
+        ev = normalize_network_log(raw)
+        assert ev["action"] == "drop_rate_exceeded"
+        assert ev["subject_kind"] == "proto"
+        assert ev["protocol"] == "HTTP" and ev["dst_port"] == "80"
+        assert ev["avg_ratio"] == 11.0  # 55/5 - the 11x offender
+
+    def test_denied_ip_form(self):
+        raw = {"MESSAGE": "denied IP: 10.1.2.10 (src) => 10.3.4.5 (dst)"}
+        ev = normalize_network_log(raw)
+        assert ev["action"] == "denied"
+        assert ev["src_ip"] == "10.1.2.10" and ev["dst_ip"] == "10.3.4.5"
+
+    def test_acl_denied_form(self):
+        raw = {"MESSAGE": "access-list OUTSIDE-IN denied tcp 203.0.113.5(44444) -> 10.0.0.1(3389) hit-cnt 1 first hit"}
+        ev = normalize_network_log(raw)
+        assert ev["action"] == "acl_denied"
+        assert ev["acl"] == "OUTSIDE-IN"
+        assert ev["protocol"] == "TCP"
+        assert ev["src_ip"] == "203.0.113.5" and ev["dst_port"] == "3389"
+
+    def test_unknown_network_stays_other(self):
+        ev = normalize_network_log({"MESSAGE": "some random cisco text"})
+        assert ev["action"] == "network_other"
+        assert ev["subject"] == "N/A"

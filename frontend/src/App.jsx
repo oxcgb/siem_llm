@@ -6,7 +6,7 @@ import {
   DashboardOutlined, ApiOutlined, BugOutlined,
   SafetyOutlined, AlertOutlined, LinkOutlined,
   SettingOutlined, InfoCircleOutlined,
-  LogoutOutlined, FileSearchOutlined
+  LogoutOutlined, FileSearchOutlined, CloudOutlined
 } from '@ant-design/icons';
 
 import { useAuth } from './hooks/useAuth';
@@ -17,6 +17,7 @@ import Incidents from './pages/Incidents';
 import VpnPage from './pages/VpnPage';
 import AdPage from './pages/AdPage';
 import MultiPage from './pages/MultiPage';
+import NetworkPage from './pages/NetworkPage';
 import Playbooks from './pages/Playbooks';
 import Settings from './pages/Settings';
 import About from './pages/About';
@@ -42,6 +43,7 @@ export default function App() {
     vpn: <VpnPage />,
     ad: <AdPage />,
     multi: <MultiPage />,
+    network: <NetworkPage />,
     incidents: <Incidents />,
     settings: <Settings authMode={authMode} authUser={authUser} />,
     audit: <Audit />,
@@ -65,6 +67,7 @@ export default function App() {
             { key: 'vpn', icon: <SafetyOutlined />, label: 'VPN' },
             { key: 'ad', icon: <SafetyOutlined />, label: 'AD' },
             { key: 'multi', icon: <AlertOutlined />, label: 'Multi' },
+            { key: 'network', icon: <CloudOutlined />, label: 'Network' },
             { key: 'incidents', icon: <LinkOutlined />, label: 'Incidents' },
             { key: 'settings', icon: <SettingOutlined />, label: 'Settings' },
             { key: 'audit', icon: <FileSearchOutlined />, label: 'Audit' },

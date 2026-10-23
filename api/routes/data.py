@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from agent import fetch_and_store_logs, run_playbook
+from agent import fetch_and_store_logs, run_playbook, run_network_analysis
 from config import settings
 from database import db
 from security import (
@@ -49,7 +49,7 @@ def get_ds():
     for r in rows:
         stored = r["auth_header"] or ""
         plain = decrypt_secret(stored)
-        r["auth_header"] = mask_token(plain)  # "" if undecryptable
+        r["auth_header"] = mask_token(plain)
         r["has_token"] = bool(stored)
         r["token_invalid"] = bool(stored) and not plain
     return rows
@@ -146,7 +146,6 @@ def delete_rule(rule_id: str, sess=Depends(require_admin)):
 
 @data_router.post("/api/correlate/{rule_id}")
 def run_rule(rule_id: str, bg: BackgroundTasks, sess=Depends(require_session)):
-    """Run a playbook: LLM analysis over the rule's window (bg task)."""
     with db() as conn:
         row = conn.execute("SELECT name FROM correlation_rules WHERE id=?", (rule_id,)).fetchone()
     if not row:
@@ -158,9 +157,15 @@ def run_rule(rule_id: str, bg: BackgroundTasks, sess=Depends(require_session)):
 
 @data_router.post("/api/fetch")
 def fetch_all(bg: BackgroundTasks, sess=Depends(require_session)):
-    """Manual fetch from all datasources (bg task)."""
     audit(sess_user(sess), "fetch", "all")
     bg.add_task(fetch_and_store_logs, "manual", True)
+    return {"status": "started"}
+
+
+@data_router.post("/api/network-analyze")
+def network_analyze(bg: BackgroundTasks, sess=Depends(require_session)):
+    audit(sess_user(sess), "network_analyze")
+    bg.add_task(run_network_analysis)
     return {"status": "started"}
 
 
@@ -196,6 +201,16 @@ def get_run(run_id: int):
     except Exception:
         d["events"] = []
     return d
+
+
+@data_router.delete("/api/playbook-runs/{run_id}")
+def delete_run(run_id: int, sess=Depends(require_admin)):
+    with db() as conn:
+        cur = conn.execute("DELETE FROM playbook_runs WHERE id=?", (run_id,))
+    if not cur.rowcount:
+        raise HTTPException(404, "run not found")
+    audit(sess_user(sess), "run_delete", str(run_id))
+    return {"status": "ok"}
 
 
 def _paged_events(table, cols, q, hours, limit, offset):
@@ -238,6 +253,113 @@ def get_ad_events(
     return _paged_events("ad_events", ["username", "src_ip", "hostname", "domain", "action", "raw_event"], q, hours, limit, offset)
 
 
+@data_router.get("/api/network-events")
+def get_network_events(
+    q: str = Query("", max_length=100),
+    hours: int = Query(24, ge=1, le=2160),
+    action: str = Query("", max_length=40),
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0)
+):
+    cutoff = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    where = ["timestamp >= ?"]
+    params = [cutoff]
+    if action:
+        where.append("action = ?")
+        params.append(action)
+    if q:
+        like = f"%{q}%"
+        where.append("(subject LIKE ? OR src_ip LIKE ? OR dst_ip LIKE ? OR acl LIKE ? OR raw_event LIKE ?)")
+        params += [like] * 5
+    w = "WHERE " + " AND ".join(where)
+    with db() as conn:
+        total = conn.execute(f"SELECT COUNT(*) c FROM network_events {w}", params).fetchone()["c"]
+        rows = conn.execute(
+            f"SELECT * FROM network_events {w} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            params + [limit, offset]).fetchall()
+    return {"events": [dict(r) for r in rows], "total": total}
+
+
+def _ip_is_public(ip):
+    import ipaddress
+    try:
+        a = ipaddress.ip_address(str(ip))
+        return not (a.is_private or a.is_loopback or a.is_reserved or a.is_link_local)
+    except ValueError:
+        return False
+
+
+@data_router.get("/api/network-summary")
+def network_summary(hours: int = Query(24, ge=1, le=2160)):
+    from geo import lookup as geo_lookup
+    cutoff = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    with db() as conn:
+        actions = [dict(r) for r in conn.execute(
+            "SELECT action, COUNT(*) n, SUM(event_count) total_hits "
+            "FROM network_events WHERE timestamp >= ? GROUP BY action ORDER BY n DESC",
+            (cutoff,))]
+        subjects = [dict(r) for r in conn.execute(
+            "SELECT subject, subject_kind, COUNT(*) n, SUM(event_count) hits, "
+            "MAX(avg_ratio) max_ratio, MAX(avg_rate) avg_rate, MAX(avg_max) avg_max, "
+            "MAX(cumulative) max_cumulative, MAX(timestamp) last_seen "
+            "FROM network_events WHERE timestamp >= ? AND action='drop_rate_exceeded' "
+            "GROUP BY subject ORDER BY hits DESC LIMIT 60", (cutoff,))]
+        denied_dst = [dict(r) for r in conn.execute(
+            "SELECT dst_ip, COUNT(*) n, SUM(event_count) hits, MAX(timestamp) last_seen "
+            "FROM network_events WHERE timestamp >= ? AND action IN ('denied','acl_denied') "
+            "AND dst_ip != 'N/A' GROUP BY dst_ip ORDER BY hits DESC LIMIT 15", (cutoff,))]
+        outbound = [dict(r) for r in conn.execute(
+            "SELECT src_ip, dst_ip, dst_port, protocol, COUNT(*) n, SUM(event_count) hits, "
+            "MAX(timestamp) last_seen FROM network_events "
+            "WHERE timestamp >= ? AND action='acl_denied' "
+            "GROUP BY src_ip, dst_ip, dst_port ORDER BY hits DESC LIMIT 20", (cutoff,))]
+        flows = [dict(r) for r in conn.execute(
+            "SELECT src_ip, COUNT(*) n, SUM(event_count) hits, "
+            "COUNT(DISTINCT dst_ip) uniq_dst, COUNT(DISTINCT dst_port) uniq_ports, "
+            "MAX(timestamp) last_seen "
+            "FROM network_events "
+            "WHERE timestamp >= ? AND action IN ('acl_denied','deny_no_conn','denied') "
+            "AND src_ip != 'N/A' GROUP BY src_ip ORDER BY hits DESC LIMIT 30", (cutoff,))]
+        bruteforce = [dict(r) for r in conn.execute(
+            "SELECT src_ip, SUM(COALESCE(event_count,1)) attempts, "
+            "COUNT(DISTINCT username) uniq_names, "
+            "MIN(timestamp) first_seen, MAX(timestamp) last_seen "
+            "FROM vpn_events WHERE timestamp >= ? AND action='login_failed' "
+            "AND src_ip != 'N/A' GROUP BY src_ip "
+            "HAVING attempts >= 10 ORDER BY attempts DESC LIMIT 15", (cutoff,))]
+
+    external = [s for s in subjects
+                if s["subject_kind"] == "ip" and _ip_is_public(s["subject"])]
+    internal = [s for s in subjects
+                if s["subject_kind"] == "ip" and not _ip_is_public(s["subject"])]
+    categories = [s for s in subjects if s["subject_kind"] == "category"]
+    protos = [s for s in subjects if s["subject_kind"] == "proto"]
+
+    external_flows = [f for f in flows if _ip_is_public(f["src_ip"])]
+    for f in external_flows:
+        f["scanner"] = (f.get("uniq_ports") or 0) >= 3
+
+    bruteforce = [b for b in bruteforce if _ip_is_public(b["src_ip"])]
+    geo_ips = ({s["subject"] for s in external}
+               | {f["src_ip"] for f in external_flows}
+               | {b["src_ip"] for b in bruteforce})
+    if geo_ips:
+        geo = geo_lookup(geo_ips)
+        for s in external:
+            s["geo"] = geo.get(s["subject"], "N/A")
+        for f in external_flows:
+            f["geo"] = geo.get(f["src_ip"], "N/A")
+
+    return {"actions": actions,
+            "bruteforce": bruteforce,
+            "external": external, "external_flows": external_flows,
+            "categories": categories,
+            "internal": internal, "protos": protos,
+            "denied_dst": denied_dst, "outbound": outbound}
+
+
 @data_router.delete("/api/vpn-events/clear")
 def clear_vpn(sess=Depends(require_admin)):
     audit(sess_user(sess), "clear_vpn")
@@ -278,9 +400,10 @@ def manual_cleanup(sess=Depends(require_admin)):
     with db() as conn:
         v = conn.execute("DELETE FROM vpn_events WHERE timestamp < ?", (cutoff,)).rowcount
         a = conn.execute("DELETE FROM ad_events WHERE timestamp < ?", (cutoff,)).rowcount
+        n = conn.execute("DELETE FROM network_events WHERE timestamp < ?", (cutoff,)).rowcount
         l = conn.execute("DELETE FROM alert_log WHERE sent_at < ?", (alert_cutoff,)).rowcount
         p = conn.execute("DELETE FROM playbook_runs WHERE started_at < ?", (pb_cutoff,)).rowcount
-    return {"status": "ok", "deleted": v + a + l + p}
+    return {"status": "ok", "deleted": v + a + n + l + p}
 
 
 @data_router.get("/api/multi-logins")
