@@ -44,7 +44,7 @@ export default function App() {
     ad: <AdPage />,
     multi: <MultiPage />,
     network: <NetworkPage />,
-    incidents: <Incidents />,
+    incidents: <Incidents authMode={authMode} authUser={authUser} />,
     settings: <Settings authMode={authMode} authUser={authUser} />,
     audit: <Audit />,
     about: <About />

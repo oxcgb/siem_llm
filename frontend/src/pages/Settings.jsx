@@ -9,6 +9,8 @@ import api from '../api';
 import AdSettingsTab from '../components/AdSettingsTab';
 import VllmTab from '../components/VllmTab';
 import TelegramTab from '../components/TelegramTab';
+import UebaTab from '../components/UebaTab';
+import WatchlistsTab from '../components/WatchlistsTab';
 
 const { Text } = Typography;
 
@@ -81,6 +83,8 @@ export default function Settings({ authMode, authUser }) {
       children: <AdSettingsTab authMode={authMode} />
     });
     tabs.push(
+      { key: 'ueba', label: 'UEBA', children: <UebaTab /> },
+      { key: 'watchlists', label: 'Watchlists', children: <WatchlistsTab /> },
       { key: 'alerts', label: 'Alerts', children: <TelegramTab /> },
       {
         key: 'prompt', label: 'AI Prompt',

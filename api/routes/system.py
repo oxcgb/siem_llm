@@ -252,3 +252,61 @@ def set_prompt(body: dict = Body(...), sess=Depends(require_admin)):
         )
     audit(sess_user(sess), "prompt_update")
     return {"status": "ok"}
+
+# ------------------------------------------------------------------ UEBA tab
+# Settings -> UEBA: runtime configuration of the behaviour engine in
+# incidents.py. Knobs are stored in the settings table (ueba_* keys),
+# layered above the UEBA_* environment variables, and are folded into
+# the live config once per build cycle (refresh_ueba_config). Editing
+# them needs neither a rebuild nor a container restart.
+
+
+@system_router.get("/api/settings/ueba")
+def get_ueba(sess=Depends(require_admin)):
+    """Effective UEBA config, active overrides and baseline health."""
+    from incidents import ueba_status
+    return ueba_status()
+
+
+@system_router.post("/api/settings/ueba")
+def set_ueba(body: dict = Body(...), sess=Depends(require_admin)):
+    """Partial update of UEBA knobs (only the provided keys change).
+    'enabled' maps to the runtime kill-switch key 'ueba_enabled'."""
+    from incidents import validate_ueba_overrides, ueba_status
+    clean, errors = validate_ueba_overrides(body)
+    if errors:
+        raise HTTPException(400, "; ".join(errors))
+    with db() as conn:
+        for key, val in clean.items():
+            setting = "ueba_enabled" if key == "enabled" else f"ueba_{key}"
+            stored = "true" if val is True else "false" if val is False else str(val)
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (setting, stored)
+            )
+    audit(sess_user(sess), "ueba_update",
+          details=",".join(sorted(clean))[:200])
+    return ueba_status()
+
+
+@system_router.delete("/api/settings/ueba")
+def reset_ueba(sess=Depends(require_admin)):
+    """Drop every ueba_* override (including the runtime switch):
+    back to environment / built-in defaults."""
+    from incidents import ueba_status
+    with db() as conn:
+        conn.execute("DELETE FROM settings WHERE key LIKE 'ueba_%'")
+    audit(sess_user(sess), "ueba_reset")
+    return ueba_status()
+
+
+@system_router.post("/api/settings/ueba/rebuild")
+def rebuild_ueba(sess=Depends(require_admin)):
+    """Force a baseline rebuild now (otherwise it happens lazily when
+    the profiles are older than UEBA_BASELINE_TTL_HOURS)."""
+    from incidents import rebuild_baselines, ueba_status
+    ok = rebuild_baselines(force=True)
+    status = ueba_status()
+    status["rebuild"] = "done" if ok else "skipped"
+    audit(sess_user(sess), "ueba_rebuild")
+    return status
